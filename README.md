@@ -9,8 +9,8 @@ These projects are likely to primarily be assembled with the SPASM assembler, wh
 
 - src/flame.z80 Produces a flame demo effect on the calculator screen. CLEAR will quit the program, and the UP and DOWN keys should increase, and decrease the contrast, resepectively. This relies on port 30h in models TI-83 Plus Silver Edition, TI-84 Plus, and TI-84 Plus Silver Edition to access hardware timers.
 
-This project can be assembled from the root of this repository with in Linux: spasm -I includes src/flame.z80 flame.8xp
+	This project can be assembled from the root of this repository with in Linux: spasm -I includes src/flame.z80 flame.8xp
 
-OR in windows
+	OR in windows
 
-spasm -I includes src\flame.z80 flame.8xp
+	spasm -I includes src\flame.z80 flame.8xp
