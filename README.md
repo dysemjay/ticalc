@@ -1,5 +1,5 @@
 # ticalc
-General repository of ti calculator programs. Likely to mostly be in z80 assembly.
+General repository of Texas Instruments calculator programs. Likely to mostly be in z80 assembly.
 
 includes/ti83plus.inc is provided here: http://wikiti.brandonw.net/index.php?title=83Plus:OS:ti83plus.inc
 
