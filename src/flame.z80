@@ -1,0 +1,451 @@
+.nolist
+#include "ti83plus.inc"
+
+BITPOS0 .EQU %00000001
+BITPOS1 .EQU %00000010
+BITPOS2 .EQU %00000100
+BITPOS3 .EQU %00001000
+BITPOS4 .EQU %00010000
+BITPOS5 .EQU %00100000
+BITPOS6 .EQU %01000000
+BITPOS7 .EQU %10000000
+
+CONTRAST_BASEVAL .EQU $d8
+
+_LCD_BUSY_QUICK    .EQU    $000b
+
+#define FLAME_STEP.PROCESS_BYTE ld a,(hl) \ call rand_shift_byte \ ld (de),a \ inc hl \ inc de
+
+#define SLL_A_1 add a,a ;4 cycles
+#define SLL_A_2 add a,a \ add a,a ;8 cycles
+#define SLL_A_3 add a,a \ add a,a \ add a,a ;12 cycles
+#define SLL_A_4 add a,a \ add a,a \ add a,a \ add a,a ;16 cycles
+#define SLL_A_5 and %00000111 \ rrca \ rrca \ rrca ;19 cycles (Oh yeah!) Will instruction decoding affect this?
+#define SLL_A_6 and %00000011 \ rrca \ rrca ;15 cycles
+#define SLL_A_7 and %00000001 \ rrca ;11 cycles
+
+#define SRL_A_1 srl a ;8 cycles
+#define SRL_A_2 and %11111100 \ rrca \ rrca ;15 cycles
+#define SRL_A_3 and %11111000 \ rrca \ rrca \ rrca ;19 cycles
+#define SRL_A_4 and %11110000 \ rrca \ rrca \ rrca \ rrca ;23 cycles
+#define SRL_A_5 and %11100000 \ rlca \ rlca \ rlca ;19 cycles
+#define SRL_A_6 and %11000000 \ rlca \ rlca ;15 cycles
+#define SRL_A_7 and %10000000 \ rlca ;11 cycles
+
+.list
+.org userMem-2
+.db t2ByteTok,tAsmCmp
+
+main:
+	
+	call seed_rng
+	call init_screen
+	
+	;disable interrupts
+	ld a,i
+	jp pe,main.interrupts_enabled
+	ld a,i
+main.interrupts_enabled:
+	push af
+	di
+	
+main.update_loop:
+	
+	;check state of CLEAR key, if it is pressed, then quit
+	ld a,$fd
+	out (1),a
+	in a,(1)
+	cp $bf
+	jr z,main.end
+	
+	call edit_lightness
+	
+	call feed_bottom_row
+	call flame_step
+	
+	call SafeCopy
+	call delay_update
+	
+	jp main.update_loop
+
+main.end:
+	
+	;enable interrupts
+	pop af
+	jp po,main.end.interrupts_disabled
+	ei
+main.end.interrupts_disabled:
+	
+	call restore_screen
+	ret
+
+	
+;A procedure to write $ff to every byte of the graph buffer, turn the run indicator off, and save the contrast variable
+;DESTROYS: AF E HL BC
+init_screen:
+
+	;save system contrast
+	ld a,(contrast)
+	ld (sys_contrast),a
+
+	bcall(_RunIndicOff)
+	bcall(_GrBufClr)
+
+	;fill gbuf
+	ld hl,PlotSScreen+767
+	ld bc,768
+	ld e,$ff
+init_screen.fill:
+
+	ld (hl),e
+	dec hl
+	
+	dec bc
+	ld a,b
+	or c
+	jp nz,init_screen.fill
+	
+	bcall(_GrBufCpy)
+	
+init_screen.end
+	ret
+
+
+;A procedure to turn the running indicator on, clear the screen, and restore the original contrast
+;DESTROYS: AF
+restore_screen:
+
+	;restore system contrast
+	ld a,(sys_contrast)
+	ld (contrast),a
+	
+	add a,CONTRAST_BASEVAL
+	call _LCD_BUSY_QUICK
+	out ($10),a
+
+	bcall(_RunIndicOn)
+	bcall(_GrBufClr)
+	
+restore_screen.end:
+	ret
+
+
+;A procedure to check the status of the [UP], and [DOWN] keys, and adjust contrast according to their status.
+;[UP] increases contrast, [DOWN] decreases it
+;DESTROYS: AF HL
+edit_lightness:
+
+	;now we check status of the [UP] and [DOWN] keys to control the lightness of the screen
+	ld a,$fe
+	out (1),a
+	in a,(1)
+	
+	cp $fe
+	jr z,edit_lightness.lighten ;[DOWN]
+	
+	cp $f7
+	jr z,edit_lightness.darken ;[UP]
+
+edit_lightness.end:
+	ret
+	
+edit_lightness.lighten:
+	
+	ld hl,contrast
+	ld a,(hl)
+	
+	;return if we are already at minimum contrast
+	or a
+	ret z ;jp edit_lightness.lighten.end:
+	
+	dec a
+	ld (hl),a
+	add a,CONTRAST_BASEVAL
+	call _LCD_BUSY_QUICK
+	out ($10),a
+
+	ret ;jp edit_lightness.end
+	
+edit_lightness.darken:
+	
+	ld hl,contrast
+	ld a,(hl)
+	
+	;return if we are already at max contrast
+	cp $27
+	ret z ;jp edit_lightness.darken.end
+	
+	inc a
+	ld (hl),a
+	add a,CONTRAST_BASEVAL
+	call _LCD_BUSY_QUICK
+	out ($10),a
+	
+	ret ;jp edit_lightness.end
+
+
+;A procedure to reseed the RNG, and reset the period counter.
+;DESTROYS: AF
+seed_rng:
+	
+	ld a,r
+	ld (rng_state),a
+	
+	xor a
+	ld (rng_period),a
+	
+seed_rng.end
+	ret
+
+	
+;A procedure to return a random number in A and reseed if the period has been reached.
+;DESTROYS: L AF AF'
+step_rng:
+
+	ld a,(rng_state)
+	
+	;y8 ^= (y8 << 7)
+	ld l,a
+	SLL_A_7
+	xor l
+	
+	;y8 ^= (y8 >> 5)
+	ld l,a
+	SRL_A_5
+	xor l
+	
+	;return y8 ^= (y8 << 3)
+	ld l,a
+	SLL_A_3
+	xor l
+	
+	ex af,af' ;';Thanks syntax highlighting :)
+	ld a,(rng_period)
+	cp 255
+	jr z,step_rng.period_reached
+	
+	inc a
+	ld (rng_period),a
+	
+	ex af,af' ;';
+	ld (rng_state),a
+	
+step_rng.end:
+	ret
+	
+step_rng.period_reached:
+
+	call seed_rng
+	ex af,af' ;';
+	
+	ret ;jp step_rng.end
+
+
+;A procedure to place a pixel in a random location in the bottom row, if the LSB of the random number is 1
+;DESTROYS: AF B DE HL
+feed_bottom_row:
+
+	call step_rng
+	
+	bit 0,a
+	ret z ;jp z,feed_bottom_row.end
+	
+	SRL_A_1 ;Shift out the bit we used to decide if we were going to continue
+	cp 96 ;Limit the position the row (0-95)
+	jr nc,feed_bottom_row.constrain_rand
+feed_bottom_row.rowpos_found:
+
+	ld b,a
+	SRL_A_3 ;Effectively divide by 8 to get the byte (0-11) to store in
+	
+	ld hl,PlotSScreen+756
+	ld d,0
+	ld e,a
+	add hl,de ;add the computed offset to hl, we have now determined which byte to write to
+	
+	ld a,b
+	and %00000111
+	rlca
+	rlca
+	rlca
+	;We load the result of this modulus division as the b parameter for the next set instruction
+	or %10000110
+	ld (feed_bottom_row.set_bitpos+1),a
+	
+;self modifying code 
+feed_bottom_row.set_bitpos:
+	res 0,(hl)
+	
+feed_bottom_row.end:
+	ret
+	
+feed_bottom_row.constrain_rand:
+
+	ld d,a
+	ld a,127
+	sub d
+
+	jp feed_bottom_row.rowpos_found
+	
+	
+;A procedure to shift a value left or right by one, depending on the value of a number, returns to A
+;Algorithm: if lsb is 0 do not shift, else if second bit is 0 shift right, if second bit is 1 shift left, shift random number right by 2
+;DESTROYS: AF AF'
+;Param 1: Value to be shifted in A
+;param 2: Random value in A'
+rand_shift_byte:
+	
+	ex af,af' ;' ;Move random value to a
+	
+	bit 0,a
+	jp z,rand_shift_byte.none
+	
+	bit 1,a
+	jp z,rand_shift_byte.right
+	
+rand_shift_byte.left:
+	SRL_A_2
+	ex af,af' ;' ;Place processed byte back in a
+	SLL_A_1
+	ret
+	
+rand_shift_byte.right:
+	SRL_A_2
+	ex af,af' ;' ;Place processed byte back in a
+	SRL_A_1
+	ret
+
+rand_shift_byte.none:
+	SRL_A_2
+	ex af,af' ;' ;Place processed byte back in a
+	ret
+
+
+;A procedure to shift the graph buffer up by one row, and randomly shift each byte, the bottom row is blanked
+;DESTROYS: HL AF B DE AF'
+flame_step:
+	
+	;scroll and randomly shift each byte
+	ld hl,PlotSScreen+12
+	ld de,PlotSScreen
+	ld b,189
+flame_step.scroll:
+
+	;scroll, and shift
+	exx ;step_rng destroys l, so we move our values into shadow registers before calling it
+	call step_rng
+	exx
+	ex af,af' ;' ;We are storing the randomly generated number in a'
+	
+	FLAME_STEP.PROCESS_BYTE
+	FLAME_STEP.PROCESS_BYTE
+	FLAME_STEP.PROCESS_BYTE
+	FLAME_STEP.PROCESS_BYTE
+	
+	djnz flame_step.scroll
+	
+	;blank bottom row
+	ld hl,PlotSScreen+767
+	ld a,$ff
+	ld b,12
+flame_step.blank_bottom:
+
+	ld (hl),a
+	
+	dec hl
+	djnz flame_step.blank_bottom
+	
+flame_step.end:
+	ret
+	
+
+;Fastcopy routine, courtesy of http://wikiti.brandonw.net/index.php?title=Z80_Routines:Graphic:Fastcopy
+;-----> Copy the gbuf to the screen, guaranteed 
+;Input: nothing
+;Output:graph buffer is copied to the screen, no matter the speed settings
+;
+;in f,(c) is an unofficial instruction.
+;It must be noted that you cannot specify any other register. Only f works.
+;You may have to add it in order for the routine to work.
+;if addinstr doesn't work, you may manually insert the opcodes .db 0EDh,070h
+
+ .addinstr IN	F,(C)	70ED	2	NOP	1
+
+SafeCopy:
+	ld hl,PlotSScreen  ;This can be commented out or another entry placed after it
+                           ;so the buffer can be provided by option.
+	ld c,$10
+	ld a,$80
+setrow:
+	in f,(c)
+	jp m,setrow
+	out ($10),a
+	ld de,12
+	ld a,$20
+col:
+	in f,(c)
+	jp m,col
+	out ($10),a
+	ex af,af' ;'
+	ld b,64
+row:
+	ld a,(hl)
+rowwait:
+	in f,(c)
+	jp m,rowwait
+	out ($11),a
+	add hl,de
+	djnz row
+	ex af,af' ;'
+	dec h
+	dec h
+	dec h
+	inc hl
+	inc a
+	cp $2c
+	jp nz,col
+	ret
+	
+	
+;A procedure to create a delay of approximately 45ms, then return.
+;DESTROYS: AF L
+delay_update:
+
+	ld l,BITPOS5 ;bit to check during time_loop, we store this here so we can immediately start checking it
+
+	;set frequency of timer to 2048hz
+	ld a,$45
+	out ($30),a 
+	
+	;timer settings no loop, no interrupt
+	xor a
+	out ($31),a
+
+	;loop 94 times
+	ld a,94
+	out ($32),a
+	
+delay_update.time_loop:
+	
+	;check the interrupt port to see when the timer expires
+	in a,($04)
+	and l ;bit 5,a
+	
+	jp z,delay_update.time_loop
+	
+delay_update.end:
+
+	;Disable timer
+	xor a
+	out ($30),a
+	
+	ret
+	
+	
+rng_state:		.db 0
+rng_period:		.db 0
+
+sys_contrast:	.db 0
+	
+.end
+.end 
