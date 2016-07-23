@@ -14,3 +14,5 @@ These projects are likely to primarily be assembled with the SPASM assembler, wh
 	OR in windows
 
 	spasm -I includes src\flame.z80 flame.8xp
+
+	The prebuild binary is also included as builds/flame.8xp
